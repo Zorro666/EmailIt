@@ -1,262 +1,111 @@
 import sys
 import os
-import getopt
-import hashlib
 
-class Usage(Exception):
-	def __init__(self, msg):
-		self.msg = msg
+import smtplib
+from email.MIMEMultipart import MIMEMultipart
+from email.MIMEBase import MIMEBase
+from email.MIMEText import MIMEText
+from email.Utils import COMMASPACE, formatdate
+from email import Encoders
 
-#########################################################
-#
-# main function wrapper for parseStressOutput
-#
-#########################################################
-
-def main(argv=None):
-	if argv is None:
-		argv = sys.argv
-	try:
-		try:
-			opts, args = getopt.getopt(argv[1:], "h", ["help"])
-		except getopt.error, msg:
-			raise Usage(msg)
-
-		return parseStressOutput(opts,args)
-
-	except Usage, err:
-		print >>sys.stderr, err.msg
-		print >>sys.stderr, "for help use --help"
-		return 2
+import optparse
+from optparse import OptionParser
 
 #########################################################
 #
-# parseStressOutput function
+# emailIt function
+#
+# A free, no authentication internet SMTP server: relay.free-online.co.uk
 #
 #########################################################
 
-def parseStressOutput(opts,args):
+def emailIt():
 
 	# Constants
-	lookingForRUN = 0
-	lookingForCRASH = 1
-	lookingForEND = 2
-
-	lookingForSTART = 0
-	parseCALLSTACK = 1
-
-	# START - Optional parameters for debug output
-	debug = 0
-	numEntriesToOutput = 5
-	# END - Optional parameters for debug output
 
 	# Internal variables with initial values
-	state = lookingForRUN
-	callstackState = lookingForSTART
 
-	crashDetails = dict()
-	crashUniqueDetails = dict()
-	callstackLines = dict()
-	callstackLineCounts = dict()
+	usage = "Usage: %prog [options]"
+	parser = OptionParser(usage)
 
-	logFileName = args[0]
-	if os.path.isfile(logFileName) == False:
-		print >>sys.stderr, "ERROR: Stress output log file not found:"+logFileName
-		return 2
+	parser.add_option("-v", "--verbose", action="store_true", dest="verbose", default=True, 
+			help="verbose debug output to stdout")
 
-	inputfile = file(logFileName,"rU")
-	if inputfile == None:
-		print >>sys.stderr, "ERROR: failed to open file:"+logFileName
-		return 2
+	parser.add_option("-q", "--quiet", action="store_false", dest="verbose", 
+			help="no verbose debug output to stdout")
 
-	while True:
-		line = inputfile.readline()
-		if len(line) == 0:
-			break
+	parser.add_option("-t", "--to", dest="send_to_list", default=None,
+			help="address(es) to send the email to", action="append")
 
-		# remove the newline from the line string
-		line = line.splitlines()[0]
-		line = line.strip()
+	parser.add_option("-f", "--from", dest="from_address", default=None,
+			help="email from address", action="store")
 
-		if state == lookingForRUN:
-			# Look for the RUN line e.g. 04/11/2010 13:10:21.11 Perf_cw2_church_04_11_2010__12_56:RUN 
-			if line.endswith(":RUN"):
-				state = lookingForCRASH
-				continue
+	parser.add_option("-s", "--subject", dest="subject", default=None,
+			help="email subject", action="store")
 
-		if state == lookingForCRASH:
-			# Look for the CRASH line e.g. 04/11/2010 13:10:21.11 Perf_cw2_church_04_11_2010__12_56:CRASH 
-			if line.endswith(":CRASH"):
-				state = lookingForEND
-				callstackState = lookingForSTART
-				# Found a crash mark it
-				currentCrashDetails = list()
-				# Parse the crashtag into the level/playlist tag for it 
-				# e.g. 04/11/2010 13:10:21.11 Perf_cw2_rooftop_gardens_04_11_2010__12_56:CRASH -> cw2_rooftop_gardens
-				# e.g. 04/11/2010  9:46:15.71 Play_MP_Reveal_04_11_2010__08_44:CRASH -> MP_Reveal
-				# <blah>_<level/playlist>_<number>
-				crashTagTokens = line.split("_")
-				crashTags = list()
-				for i in range(1,len(crashTagTokens)):
-					token = crashTagTokens[i]
-					if unicode(token).isnumeric() == False:
-							crashTags.append(token)
-							continue
-					break;
-				crashTag = "_".join(crashTags)
-					
-				currentCrashDetails.append(crashTag)
-				continue
+	parser.add_option("", "--server", dest="server", default=None,
+			help="smtp email server address", action="store")
 
-		if state == lookingForEND:
-			# Look for the END line e.g. 04/11/2010 13:10:21.11 Perf_cw2_church_04_11_2010__12_56:END 
-			if line.endswith(":END"):
-				state = lookingForRUN
+	parser.add_option("-b", "--body", dest="body", default=None,
+			help="email message text body", action="store")
 
-			# Ignore lines from suspended threads e.g.  Suspended thread (RenderThread):
-			# This also marks the end of the callstack
-			if line.startswith("Suspended thread"):
-				state = lookingForRUN
+	parser.add_option("-a", "--attach", dest="attach_list", default=None,
+			help="file(s) to attach to the email", action="append")
 
-			if state == lookingForRUN:
-				if debug > 0:
-					print "################ CRASH ################"
-					for entry in currentCrashDetails:
-						print entry
-					print ""
+	(options, args) = parser.parse_args()
 
-				# Make a total hash of the callstack for pure equivalence testing
-				crashTag = currentCrashDetails[0]
-				callstackHash = hashlib.md5()
-				for i in range(1,len(currentCrashDetails)):
-					callstackLine = currentCrashDetails[i]
-					# Add a hash for each line in the callstack
-					callstackLineHash = hashlib.md5()
-					callstackLineHash.update(callstackLine)
-					callstackLineHexHash = callstackLineHash.hexdigest()
-					callstackLineCounts.setdefault(callstackLineHexHash, []).append(crashTag)
-					callstackLines[callstackLineHexHash] = callstackLine
+	if len(args) != 0:
+		parser.error("Incorrect number of arguments (-h for help)")
 
-					# Make a combined hash from the total callstack
-					callstackHash.update(callstackLine)
+	if options.verbose == True:
+		print("")
+		print("Verbose output")
+		print("")
 
-				currentUniqueHash = callstackHash.hexdigest()
+	if options.from_address == None:
+		parser.error("Email from address not set (-h for help)")
+		
+	if options.send_to_list == None:
+		parser.error("Email to address(es) not set (-h for help)")
 
-				crashDetails.setdefault(currentUniqueHash, []).append(currentCrashDetails)
-				crashUniqueDetails.setdefault(currentUniqueHash, []).append(crashTag)
-				continue
+	if options.subject == None:
+		parser.error("Email subject not set (-h for help)")
 
-			if callstackState == lookingForSTART:
-				# Now looking for the start of the call stack e.g. "Call Stack Trace:"
-				if line.startswith("Call Stack Trace:"):
-					callstackState = parseCALLSTACK
-					continue
+	if options.server == None:
+		parser.error("SMTP email server not set (-h for help)")
 
-			if callstackState == parseCALLSTACK:
-				# Parse each stack line
-				# Looking for patterns like this: 
-				# 38) function=0x8009C4B4
-				# 32) IDebugCallStack::FatalError() [idebugcallstack.cpp:144] 
-				# i.e. <number> + ") " + "function=" + <ASCII>
-				# OR
-				# i.e. <number> + ") " + <ASCII> + " [" + <ASCII> + ":" + <number> + "]"
-				lineTokens = line.split(")")
-				if unicode(lineTokens[0]).isnumeric() == False:
-					continue
+	if options.body == None:
+		if options.attach_list == None:
+			parser.error("Must specify email message text body or files to attach (-h for help)")
+		
+	if options.verbose == True:
+		print("Email From: "+options.from_address)
+		print("Email To: "+",".join(options.send_to_list))
+		print("Email Subject: "+options.subject)
+		if options.body != None:
+			print("Email Body Test: "+options.body)
+		if options.attach_list != None:
+			print("Attach Files: "+",".join(options.attach_list))
+			
+	msg = MIMEMultipart()
+	msg['From'] = options.from_address
+	msg['To'] = COMMASPACE.join(options.send_to_list)
+	msg['Date'] = formatdate(localtime=True)
+	msg['Subject'] = options.subject
 
-				lineTokens.pop(0)
-				callstackLine = ")".join(lineTokens)
-				callstackLine = callstackLine.strip()
-				currentCrashDetails.append(callstackLine)
+	msg.attach( MIMEText(options.body) )
 
-	numUniqueCrashes = len(crashUniqueDetails)
-	numCrashes = 0
-	for crashHash, crashList in crashDetails.items():
-		for crashDetail in crashList:
-			numCrashes += 1
+	for f in options.attach_list:
+		part = MIMEBase('application', "octet-stream")
+		part.set_payload( open(f,"rb").read() )
+		Encoders.encode_base64(part)
+		part.add_header('Content-Disposition', 'attachment; filename="%s"' % os.path.basename(f))
+		msg.attach(part)
 
-	# Sort the unique crashes to put the most common at the top
-	# Make a list of the hashes with counts so we can sort them
-	uniqueCrashCounts = list()
-	for crashHash, crashList in crashDetails.items():
-		numCrashesForHash = len(crashList)
-		uniqueCrashCounts.append( (crashHash,numCrashesForHash) )
-
-	# Quick bubble sort 
-	numUniqueCounts = len(uniqueCrashCounts)
-	for i in range(numUniqueCounts):
-		for j in range(i+1,numUniqueCounts):
-			numCrashI = uniqueCrashCounts[i][1]
-			numCrashJ = uniqueCrashCounts[j][1]
-			if numCrashJ > numCrashI:
-				# Swap element
-				tempCrashCount = uniqueCrashCounts[j]
-				uniqueCrashCounts[j] = uniqueCrashCounts[i]
-				uniqueCrashCounts[i] = tempCrashCount
-
-	# Sort the callstackCounts by the number of counts to put most common at the top
-	# Make a list of the hashes with counts so we can sort them
-	uniqueCallstackLineCounts = list()
-	for callstackLineHash, crashList in callstackLineCounts.items():
-		numCrashesForHash = len(crashList)
-		uniqueCallstackLineCounts.append( (callstackLineHash,numCrashesForHash) )
-
-	# Quick bubble sort 
-	numUniqueCallstackLineCounts = len(uniqueCallstackLineCounts)
-	for i in range(numUniqueCallstackLineCounts):
-		for j in range(i+1,numUniqueCallstackLineCounts):
-			numCrashI = uniqueCallstackLineCounts[i][1]
-			numCrashJ = uniqueCallstackLineCounts[j][1]
-			if numCrashJ > numCrashI:
-				# Swap element
-				tempCrashCount = uniqueCallstackLineCounts[j]
-				uniqueCallstackLineCounts[j] = uniqueCallstackLineCounts[i]
-				uniqueCallstackLineCounts[i] = tempCrashCount
-
-	print "NumUniqueCounts = " + str(numUniqueCounts)
-	for i in range(numUniqueCounts):
-		crashHash = uniqueCrashCounts[i][0]
-		crashDetail = crashUniqueDetails[crashHash]
-		print
-		print "UNIQUE CRASH: " + crashHash + " NumTimes:" + str(len(crashDetail))
-		for detail in crashDetail:
-			print "Level/Playlist: " + detail
-		print "#### CallStack ####"
-		currentCrashDetails = crashDetails[crashHash][0]
-		for i in range(1,len(currentCrashDetails)):
-			print currentCrashDetails[i]
-
-	print
-	print "NumUniqueCallstackLineCounts = " + str(numUniqueCallstackLineCounts)
-	for i in range(numUniqueCallstackLineCounts):
-		callstackLineHash = uniqueCallstackLineCounts[i][0]
-		callstackLine = callstackLines[callstackLineHash]
-		callstackDetail = callstackLineCounts[callstackLineHash]
-		print
-		print callstackLine + " NumTimes:" + str(len(callstackDetail))
-		for detail in callstackDetail:
-			print "Level/Playlist: " + detail
-
-	if debug > 0:
-		print "NumCrashes = " + str(numCrashes)
-		for crashHash, crashList in crashDetails.items():
-			for crashDetail in crashList:
-				currentCrashDetails = crashDetail
-				lenCurrentCrashDetails = len(currentCrashDetails);
-				if lenCurrentCrashDetails > 0:
-					crashTag = currentCrashDetails[0]
-				print "################ START CRASH: " + crashHash
-				print crashTag
-				for i in range(1,lenCurrentCrashDetails):
-					print currentCrashDetails[i]
-					if i >= numEntriesToOutput:
-						break
-				print "################ END CRASH ################"
+	smtp = smtplib.SMTP(options.server)
+	smtp.sendmail(options.from_address, options.send_to_list, msg.as_string())
+	smtp.close()
 	
-	print
-	print "NumUniqueCrashes:" + str(numUniqueCrashes) + " NumCrashes:" + str(numCrashes)
-
-
 #########################################################
 #
 # Main function call if running from command line
@@ -264,5 +113,5 @@ def parseStressOutput(opts,args):
 #########################################################
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(emailIt())
 
